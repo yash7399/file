@@ -1,0 +1,36 @@
+package com.example.sft.config;
+
+public class FileConfig {
+	
+	private String filename;
+	private String source;
+	private String destination;
+	private int time;
+	
+	public String getDestination() {
+		return destination;
+	}
+	public void setDestination(String destination) {
+		this.destination = destination;
+	}
+	public int getTime() {
+		return time;
+	}
+	public void setTime(int time) {
+		this.time = time;
+	}
+	public String getFilename() {
+		return filename;
+	}
+	public void setFilename(String filename) {
+		this.filename = filename;
+	}
+	public String getSource() {
+		return source;
+	}
+	public void setSource(String source) {
+		this.source = source;
+	}
+	
+	
+}
