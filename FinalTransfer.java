@@ -16,209 +16,266 @@ import java.util.regex.Pattern;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import com.example.sft.constants.GlobalConstants;
 import com.hierynomus.msdtyp.AccessMask;
 import com.hierynomus.msfscc.FileAttributes;
 import com.hierynomus.mssmb2.SMB2CreateDisposition;
 import com.hierynomus.mssmb2.SMB2ShareAccess;
+import com.hierynomus.mssmb2.SMBApiException;
 import com.hierynomus.smbj.session.Session;
 import com.hierynomus.smbj.share.DiskShare;
 import com.jcraft.jsch.ChannelSftp;
 import com.jcraft.jsch.SftpException;
 
 @Component
-public class FinalTransfer {
+public class FileTransferService {
 
-	private static final int BUFFER_SIZE = 8192;
-	
-	private static final Logger log = LogManager.getLogger(FinalTransfer.class);
+	@Autowired
+	Emails emails;
 
-	public void transfer(ChannelSftp sftp, Session session, String fileName, String smbShareName, String sourcePath,
-			String destinationPath, int time, String department, Map<String, List<String>> missingFiles)
-			throws Exception {
+	private static final int BUFFER_SIZE = 64 * 1024;
 
-		DiskShare share = (DiskShare) session.connectShare("nseit");
+	private static final Logger log = LogManager.getLogger(FileTransferService.class);
 
+	public void transfer(ChannelSftp sftp, DiskShare share, String fileName, String smbShareName, String sourcePath,
+			String destinationPath, int time, String department, Map<String, List<String>> missingFiles,
+			Map<String, List<String>> transferedFiles) throws Exception {
+		
 		try {
-			if (fileName.contains("N.")) {
-				transferMultipleFiles(sftp, share, fileName, sourcePath, destinationPath, time, department,
-						missingFiles);
-			} else {
-				transferSingleFile(sftp, share, fileName, sourcePath, destinationPath, time, department, missingFiles);
-			}
-		} finally {
-			share.close();
+			sftp.stat(sourcePath);
+		}
+		catch(Exception e) {
+			missingFiles.computeIfAbsent(department, k -> new ArrayList<>()).add(fileName);
+			System.out.println("Missing or failed to transfer " + fileName);
+			log.info("Missing or failed to transfer " + fileName);
+			return;
+		}
+
+		if (fileName.contains("N.")) {
+			transferMultipleFiles(sftp, share, fileName, sourcePath, destinationPath, time, department, missingFiles,
+					transferedFiles);
+		} else {
+			transferSingleFile(sftp, share, fileName, sourcePath, destinationPath, time, department, missingFiles,
+					transferedFiles);
 		}
 	}
 
-	private void transferSingleFile(
-			ChannelSftp sftp, 
-			DiskShare share, 
-			String fileName, 
-			String sourcePath,
-			String destinationPath, 
-			int time, 
-			String department, 
-			Map<String, List<String>> missingFiles)
-			throws SftpException, IOException {
+	private void transferSingleFile(ChannelSftp sftp, DiskShare share, String fileName, String sourcePath,
+			String destinationPath, int time, String department, Map<String, List<String>> missingFiles,
+			Map<String, List<String>> transferedFiles) {
 
 		String sftpFilePath = sourcePath + "/" + fileName;
 
 		try {
 			sftp.stat(sftpFilePath);
-			copyFile(sftp, share, fileName, sftpFilePath, destinationPath, time, department, missingFiles);
+			try {
+				copyFile(sftp, share, fileName, sftpFilePath, destinationPath, time, department, missingFiles,
+						transferedFiles);
+			} catch (Exception e) {
+				e.printStackTrace();
+			}
 			System.out.println(fileName + " transferred successfully");
-			log.info(fileName+" Transfered sucessfully");
-			
-			
+			log.info(fileName + " Transfered sucessfully");
+			transferedFiles.computeIfAbsent(department, k -> new ArrayList<>()).add(fileName);
 		}
 
-		catch (SftpException e) {
-			if (e.id == ChannelSftp.SSH_FX_NO_SUCH_FILE) {
-				missingFiles.computeIfAbsent(department, k -> new ArrayList<>()).add(fileName);
-				System.out.println("Missing file is " + fileName);
-				log.info(fileName+" added to missing");
-			} else {
-				throw e;
-			}
+		catch (Exception e) {
+			missingFiles.computeIfAbsent(department, k -> new ArrayList<>()).add(fileName);
+			System.out.println("Missing or failed to transfer " + fileName);
+			log.info("Missing or failed to transfer " + fileName);
 		}
 
 	}
 
 	private void transferMultipleFiles(ChannelSftp sftp, DiskShare share, String templateFileName, String sourcePath,
-			String destinationPath, int time, String department, Map<String, List<String>> missingFiles)
-			throws SftpException, Exception {
+			String destinationPath, int time, String department, Map<String, List<String>> missingFiles,
+			Map<String, List<String>> transferedFiles) throws SftpException {
 
-		String basename = templateFileName.substring(0, templateFileName.lastIndexOf('_'));
-//		System.out.println(templateFileName);
-//		System.out.println(templateFileName.lastIndexOf('.' + 1));
-
-		String extension = templateFileName.substring(templateFileName.lastIndexOf('.')+1);
-
-		Pattern pattern = buildPattern(templateFileName);
-		if (pattern == null) {
-			return;
-		}
-
-		String glob = basename + "_*" + "." + extension;
-
-		Vector<ChannelSftp.LsEntry> files = sftp.ls(sourcePath + "/" + glob);
-
-		int count = 0;
-
-		for (ChannelSftp.LsEntry entry : files) {
-
-			if (entry.getAttrs().isDir()) {
-				continue;
-			}
-
-			String currentFileName = entry.getFilename();
-
-			if (pattern.matcher(currentFileName).matches()) {
-				String sftpFilePath = sourcePath + "/" + currentFileName;
-				copyFile(sftp, share,currentFileName, sftpFilePath, destinationPath, time, department, missingFiles);
-
-				System.out.println(currentFileName + " transferred successfully");
-				log.info(currentFileName+" Transfered sucessfully");
-				count++;
-			}
-		}
-		
-		if (count == 0) {
-			missingFiles.computeIfAbsent(department, k -> new ArrayList<>()).add(templateFileName);
-			log.info(templateFileName+" added to missing files ");
-		}
-		else {
+		try {
 			
+			String basename = templateFileName.substring(0, templateFileName.lastIndexOf('_'));
+			
+			String extension = templateFileName.substring(templateFileName.lastIndexOf('.') + 1);
+			
+			
+			
+			Pattern pattern = buildPattern(templateFileName);
+			if (pattern == null) {
+				return;
+			}
+			
+			
+			String glob = basename + "_*" + "." + extension;
+			
+			
+			
+			Vector<ChannelSftp.LsEntry> files = sftp.ls(sourcePath + "/" + glob);
+			
+			int count = 0;
+			
+			
+			for (ChannelSftp.LsEntry entry : files) {
+				
+				if (entry.getAttrs().isDir()) {
+					continue;
+				}
+				
+				String currentFileName = entry.getFilename();
+				
+				if (pattern.matcher(currentFileName).matches()) {
+					try {
+						
+						String sftpFilePath = sourcePath + "/" + currentFileName;
+						copyFile(sftp, share, currentFileName, sftpFilePath, destinationPath, time, department,
+								missingFiles, transferedFiles);
+						
+						System.out.println(currentFileName + " transferred successfully");
+						log.info(currentFileName + " Transfered sucessfully");
+						transferedFiles.computeIfAbsent(department, k -> new ArrayList<>()).add(currentFileName);
+						count++;
+					} catch (Exception e) {
+						System.out.println("Failed to transfer file due to " + e.getMessage());
+					}
+				}
+			}
+			
+			if (count == 0) {
+				missingFiles.computeIfAbsent(department, k -> new ArrayList<>()).add(templateFileName);
+				log.info(templateFileName + " added to missing files ");
+			}
+		}
+		catch(SftpException e) {
+			if (e.id == ChannelSftp.SSH_FX_PERMISSION_DENIED) {
+				System.out.println("Error in transfering file : " + e.getMessage());
+				log.error("Error in transfering file : " + e.getMessage());
+				missingFiles.computeIfAbsent(department, k -> new ArrayList<>()).add(templateFileName);
+				throw e;
+			} else {
+				log.error(e);
+				emails.connectionIssue();
+			}
 		}
 	}
 
 	private void copyFile(ChannelSftp sftp, DiskShare share, String fileName, String sftpFilePath,
-			String destinationPath, int time, String department, Map<String, List<String>> missingFiles)
-			throws SftpException, IOException {
-
-
-		if (!share.folderExists(destinationPath)) {
-			share.mkdir(destinationPath);
+			String destinationPath, int time, String department, Map<String, List<String>> missingFiles,
+			Map<String, List<String>> transferedFiles){
+		
+		String[] folders = destinationPath.split("/");
+		String currentPath = "";
+		for (String folder : folders) {
+			currentPath = currentPath.isEmpty() ? folder : currentPath + "/" + folder;
+			try {
+				share.mkdir(currentPath);
+			}
+			catch(SMBApiException e) {
+				log.info("Error in making folder "+e);
+			}
 		}
 
-		String localTempDir = "C:\\Users\\int30\\eclipse-workspace\\Sft\\localFiles"; 
-																						
+		String localTempDir = GlobalConstants.local_folder_temporary;
+
 		String localFilePath = localTempDir + "\\" + fileName;
 		System.out.println("Local temp path: " + localFilePath);
 
 		boolean downloaded = false;
 		boolean uploaded = false;
 
-// Step 1: Download from SFTP to local file
-		try (InputStream inputStream = sftp.get(sftpFilePath);
-				OutputStream localOutputStream = new FileOutputStream(localFilePath)) {
-			
-			byte[] buffer = new byte[BUFFER_SIZE];
-			int bytesRead;
-			while ((bytesRead = inputStream.read(buffer)) != -1) {
-				localOutputStream.write(buffer, 0, bytesRead);
-			}
-			localOutputStream.flush();
-			downloaded = true;
-			System.out.println("Downloaded to local: " + localFilePath);
-			
-			log.info(fileName+" downloaded locally to  "+localFilePath);
-			
-		} catch (Exception e) {
-			System.err.println("SFTP->Local download failed: " + e.getMessage());
-			log.info("SFTP->Local download failed: " + e.getMessage());
-			log.error(e);
-			e.printStackTrace();
+		try {
+			java.nio.file.Files.createDirectories(java.nio.file.Paths.get(localTempDir));
+		} catch (IOException dirEx) {
+			System.err.println("Failed to create local temp directory: " + dirEx.getMessage());
+			log.error("Failed to create local temp directory: " + dirEx.getMessage(), dirEx);
 		}
 
-// Step 2: Upload from local file to SMB
-		if (downloaded) {
-			try (InputStream localInputStream = new FileInputStream(localFilePath);
-					com.hierynomus.smbj.share.File smbFile = share.openFile(destinationPath + "\\" + fileName,
-							EnumSet.of(AccessMask.FILE_WRITE_DATA, AccessMask.FILE_READ_ATTRIBUTES,
-									AccessMask.FILE_APPEND_DATA),
-							EnumSet.of(FileAttributes.FILE_ATTRIBUTE_NORMAL), SMB2ShareAccess.ALL,
-							SMB2CreateDisposition.FILE_OVERWRITE_IF, null);
-					OutputStream smbOutputStream = smbFile.getOutputStream()) {
+		try {
+
+			System.out.println(sftpFilePath);
+
+			try (InputStream inputStream = sftp.get(sftpFilePath);
+					OutputStream localOutputStream = new FileOutputStream(localFilePath)) {
+
 				byte[] buffer = new byte[BUFFER_SIZE];
 				int bytesRead;
-				while ((bytesRead = localInputStream.read(buffer)) != -1) {
-					smbOutputStream.write(buffer, 0, bytesRead);
+				while ((bytesRead = inputStream.read(buffer)) != -1) {
+					localOutputStream.write(buffer, 0, bytesRead);
 				}
-				smbOutputStream.flush(); // ensure data is pushed
-				uploaded = true;
-				System.out.println("Uploaded to SMB: " + destinationPath + "\\" + fileName);
-				
-				log.info("Uploaded to SMB: " + destinationPath + "\\" + fileName);
-				
-				
-			} catch (Exception e) {
-				System.err.println("Local->SMB upload failed: " + e.getMessage());
-				log.info("Local->SMB upload failed: " + e.getMessage());
-				log.error(e);
+				localOutputStream.flush();
+				downloaded = true;
+				System.out.println("Downloaded to local: " + localFilePath);
+
+				log.info(fileName + " downloaded locally to  " + localFilePath);
+
 			}
-		}
 
-// Step 3: Delete local temp file only if upload succeeded
+			if (downloaded) {
+				try (InputStream localInputStream = new FileInputStream(localFilePath);
+						com.hierynomus.smbj.share.File smbFile = share.openFile(destinationPath + "\\" + fileName,
+								EnumSet.of(AccessMask.FILE_WRITE_DATA, AccessMask.FILE_READ_ATTRIBUTES,
+										AccessMask.FILE_APPEND_DATA),
+								EnumSet.of(FileAttributes.FILE_ATTRIBUTE_NORMAL), SMB2ShareAccess.ALL,
+								SMB2CreateDisposition.FILE_OVERWRITE_IF, null);
+						OutputStream smbOutputStream = smbFile.getOutputStream()) {
+					byte[] buffer = new byte[BUFFER_SIZE];
+					int bytesRead;
+					while ((bytesRead = localInputStream.read(buffer)) != -1) {
+						if(!Thread.currentThread().isInterrupted()) {
+							
+							smbOutputStream.write(buffer, 0, bytesRead);
+						}
+						else {
+							System.out.println("Thread was intrepted");
+						}
+					}
+					smbOutputStream.flush(); // ensure data is pushed
+					uploaded = true;
+					System.out.println("Uploaded to SMB: " + destinationPath + "\\" + fileName);
 
+					log.info("Uploaded to SMB: " + destinationPath + "\\" + fileName);
 
-		if (uploaded) {
+				}
+			}
+
 			try {
 				java.nio.file.Path p = java.nio.file.Paths.get(localFilePath);
 				java.nio.file.Files.deleteIfExists(p);
 				System.out.println("Deleted local temp file: " + localFilePath);
 				log.info("Deleted local temp file: " + localFilePath);
-				
+
 			} catch (Exception e) {
 				System.err.println("Failed to delete local temp file: " + e.getMessage());
 				log.error("Failed to delete local temp file: " + e.getMessage());
 				log.error(e);
 			}
-		} else {
-			System.out.println("Keeping local file for troubleshooting: " + localFilePath);
-			log.info("Keeping local file for troubleshooting: " + localFilePath);
+
+		} catch (SftpException e) {
+
+			if (e.id == ChannelSftp.SSH_FX_PERMISSION_DENIED) {
+				System.out.println("Error in transfering file : " + e.getMessage());
+				log.error("Error in transfering file : " + e.getMessage());
+//				throw e;
+			} else {
+				log.error(e);
+				emails.connectionIssue();
+			}
+		} catch (IOException e) {
+			String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
+			
+			if (msg.contains("access is denied") || msg.contains("permission denied") || msg.contains("being used")) {
+				System.out.println("Error in transfering file :  " + e.getMessage());
+				log.error("Error in transfering file : " + e.getMessage());
+//				throw e;
+			} else {
+				log.error(e);
+				emails.connectionIssue();
+			}
+
+		} catch (Exception e) {
+			System.out.println("From here");
+			e.printStackTrace();
 		}
 
 	}
